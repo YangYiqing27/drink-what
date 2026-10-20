@@ -1,0 +1,8 @@
+name = "drink-what"
+compatibility_date = "2026-10-20"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "drink-what"
+database_id = "在 Cloudflare D1 创建数据库后填入 ID"

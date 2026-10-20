@@ -1,4 +1,5 @@
 import { categories, storageKey, dateKey, fromDate, numberOrNull, migrate, summarize, monthCells } from './model.js';
+import { pullState, pushState } from './cloud.js';
 
 const paths = {
   drop: '<path d="M12 3C9 7 5.5 10.5 5.5 15a6.5 6.5 0 0 0 13 0C18.5 10.5 15 7 12 3Z"/><path d="M9 15a3 3 0 0 0 3 3"/>',
@@ -18,12 +19,41 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 const fmt = n => Number(n || 0).toLocaleString();
 let state = migrate(JSON.parse(localStorage.getItem(storageKey) || 'null'));
 let page = 'home', selectedDate = dateKey(new Date()), month = fromDate(selectedDate), undoRecord, toastTimer;
-const allCategories = () => [...categories, ...state.categories];
+let cloudReady = false, cloudSyncTimer;
+const allCategories = () => categories;
 const categoryOf = id => allCategories().find(c => c.id === id) || categories.at(-1);
-const brandsFor = category => state.custom.filter(b => b.category === category);
-const brandOf = id => state.custom.find(b => b.id === id);
+const brandsFor = category => state.brands.filter(b => b.category === category);
+const brandOf = id => state.brands.find(b => b.id === id);
 const drinksFor = brand => brandOf(brand)?.drinks || [];
-const save = () => { try { localStorage.setItem(storageKey, JSON.stringify(state)); return true; } catch { return false; } };
+const mergeStates = (remote, local) => {
+  const merged = migrate(remote);
+  const brandKey = brand => `${brand.category}:${brand.name.toLocaleLowerCase()}`;
+  const brandMap = new Map(merged.brands.map(brand => [brandKey(brand), brand]));
+  local.brands.forEach(brand => {
+    const key = brandKey(brand);
+    const target = brandMap.get(key) || (() => {
+      const created = { ...brand, drinks: [] };
+      merged.brands.push(created); brandMap.set(key, created); return created;
+    })();
+    const drinkNames = new Set(target.drinks.map(drink => drink.name.toLocaleLowerCase()));
+    brand.drinks.forEach(drink => { if (!drinkNames.has(drink.name.toLocaleLowerCase())) target.drinks.push(drink); });
+  });
+  const records = new Map(merged.records.map(record => [record.id, record]));
+  local.records.forEach(record => records.set(record.id, record));
+  merged.records = [...records.values()];
+  if (local.goal !== 2000) merged.goal = local.goal;
+  return migrate(merged);
+};
+const save = () => {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(state));
+    if (cloudReady) {
+      clearTimeout(cloudSyncTimer);
+      cloudSyncTimer = setTimeout(() => pushState(state).catch(() => {}), 250);
+    }
+    return true;
+  } catch { return false; }
+};
 const daily = date => state.records.filter(r => r.date === date).sort((a, b) => b.time.localeCompare(a.time));
 const total = date => daily(date).reduce((s, r) => s + r.amount, 0);
 const nav = (id, text, symbol) => `<button class="nav-item ${page === id ? 'active' : ''}" data-page="${id}">${icon(symbol)}<span>${text}</span></button>`;
@@ -71,16 +101,30 @@ function openRecord(category = 'water') {
   categoryInput.onchange = refreshBrands; brandSelect.onchange = () => { document.querySelector('#brand').value = brandOf(brandSelect.value)?.name || ''; refreshDrinks(); };
   drinkSelect.onchange = () => { const d = drinksFor(brandSelect.value).find(d => d.id === drinkSelect.value); document.querySelector('#drink-name').value = d?.name || ''; if (d) { document.querySelector('#caffeine').value = d.caffeinePer100 == null ? '' : (d.caffeinePer100 * Number(document.querySelector('#amount').value) / 100).toFixed(1); document.querySelector('#calories').value = d.caloriesPer100 == null ? '' : (d.caloriesPer100 * Number(document.querySelector('#amount').value) / 100).toFixed(1); } };
   document.querySelectorAll('[data-amount]').forEach(b => b.onclick = () => { document.querySelector('#amount').value = b.dataset.amount; });
-  form.onsubmit = e => { e.preventDefault(); const brandID = brandSelect.value, brand = document.querySelector('#brand').value.trim() || brandOf(brandID)?.name, drinkID = drinkSelect.value, drink = document.querySelector('#drink-name').value.trim() || drinksFor(brandID).find(d => d.id === drinkID)?.name, date = document.querySelector('#date').value, amount = Number(document.querySelector('#amount').value); if (!brand || !drink || !Number.isInteger(amount) || date > dateKey(new Date())) return; const existingBrand = brandOf(brandID); const existingDrink = drinksFor(brandID).find(d => d.id === drinkID); state.records.push({ id: crypto.randomUUID(), date, time: document.querySelector('#time').value, amount, category: categoryInput.value, brandId: existingBrand?.id || null, brandName: brand, drinkId: existingDrink?.id || null, drinkName: drink, typeName: drink, caffeine: numberOrNull(document.querySelector('#caffeine').value), calories: numberOrNull(document.querySelector('#calories').value), note: '' }); save(); selectedDate = date; document.querySelector('#modal').close(); render(); if (!existingBrand && confirm(`是否把品牌“${brand}”保存到品牌列表？`)) { state.custom.push({ id: crypto.randomUUID(), category: categoryInput.value, name: brand, drinks: [] }); save(); render(); } else if (existingBrand && !existingDrink && confirm(`是否把“${drink}”保存到品牌“${brand}”下？`)) { existingBrand.drinks.push({ id: crypto.randomUUID(), name: drink, caffeinePer100: null, caloriesPer100: null }); save(); render(); } };
+  form.onsubmit = e => { e.preventDefault(); const brandID = brandSelect.value, brand = document.querySelector('#brand').value.trim() || brandOf(brandID)?.name, drinkID = drinkSelect.value, drink = document.querySelector('#drink-name').value.trim() || drinksFor(brandID).find(d => d.id === drinkID)?.name, date = document.querySelector('#date').value, amount = Number(document.querySelector('#amount').value); if (!brand || !drink || !Number.isInteger(amount) || date > dateKey(new Date())) return; const existingBrand = brandOf(brandID); const existingDrink = drinksFor(brandID).find(d => d.id === drinkID); state.records.push({ id: crypto.randomUUID(), date, time: document.querySelector('#time').value, amount, category: categoryInput.value, brandId: existingBrand?.id || null, brandName: brand, drinkId: existingDrink?.id || null, drinkName: drink, typeName: drink, caffeine: numberOrNull(document.querySelector('#caffeine').value), calories: numberOrNull(document.querySelector('#calories').value), note: '' }); save(); selectedDate = date; document.querySelector('#modal').close(); render(); if (!existingBrand && confirm(`是否把品牌“${brand}”保存到品牌列表？`)) { state.brands.push({ id: crypto.randomUUID(), category: categoryInput.value, name: brand, drinks: [] }); save(); render(); } else if (existingBrand && !existingDrink && confirm(`是否把“${drink}”保存到品牌“${brand}”下？`)) { existingBrand.drinks.push({ id: crypto.randomUUID(), name: drink, caffeinePer100: null, caloriesPer100: null }); save(); render(); } };
 }
 function openManage(category = 'coffee') {
   openModal(`${modalHead('品牌与饮品管理')}<label class="field-label">大类</label><select id="manage-category" class="standard-input">${categoryOptions(category)}</select><div id="brand-list" class="type-list"></div><form id="brand-form"><label class="field-label">新增品牌</label><input class="standard-input" name="brand" placeholder="例如：瑞幸" required><button class="primary-button" type="submit">${icon('plus')} 添加品牌</button></form><form id="drink-form"><label class="field-label">选择品牌</label><select class="standard-input" name="brand"></select><label class="field-label">新增饮品名称</label><input class="standard-input" name="drink" placeholder="例如：美式" required><div class="form-row nutrition-form"><label>咖啡因/100ml<input name="caffeine" type="number" step=".1"></label><label>热量/100ml<input name="calories" type="number" step=".1"></label></div><button class="primary-button" type="submit">${icon('plus')} 添加到品牌</button></form>`);
   const categoryInput = document.querySelector('#manage-category'), list = document.querySelector('#brand-list'), drinkForm = document.querySelector('#drink-form');
-  function refresh() { const brands = brandsFor(categoryInput.value); list.innerHTML = brands.length ? brands.map(b => `<div class="brand-management-row"><strong>${esc(b.name)}</strong><button data-remove-brand="${esc(b.id)}" aria-label="删除品牌">${icon('trash')}</button><div>${b.drinks.map(d => `<span>${esc(d.name)} <button data-remove-drink="${esc(d.id)}" data-brand-id="${esc(b.id)}" aria-label="删除饮品">${icon('close')}</button></span>`).join('')}</div></div>`).join('') : '<div class="empty-state">还没有品牌，请添加</div>'; drinkForm.elements.brand.innerHTML = brands.map(b => `<option value="${esc(b.id)}">${esc(b.name)}</option>`).join(''); list.querySelectorAll('[data-remove-brand]').forEach(b => b.onclick = () => { state.custom = state.custom.filter(x => x.id !== b.dataset.removeBrand); save(); refresh(); }); list.querySelectorAll('[data-remove-drink]').forEach(b => b.onclick = () => { const brand = brandOf(b.dataset.brandId); if (brand) brand.drinks = brand.drinks.filter(d => d.id !== b.dataset.removeDrink); save(); refresh(); }); }
+  function refresh() { const brands = brandsFor(categoryInput.value); list.innerHTML = brands.length ? brands.map(b => `<div class="brand-management-row"><strong>${esc(b.name)}</strong><button data-remove-brand="${esc(b.id)}" aria-label="删除品牌">${icon('trash')}</button><div>${b.drinks.map(d => `<span>${esc(d.name)} <button data-remove-drink="${esc(d.id)}" data-brand-id="${esc(b.id)}" aria-label="删除饮品">${icon('close')}</button></span>`).join('')}</div></div>`).join('') : '<div class="empty-state">还没有品牌，请添加</div>'; drinkForm.elements.brand.innerHTML = brands.map(b => `<option value="${esc(b.id)}">${esc(b.name)}</option>`).join(''); list.querySelectorAll('[data-remove-brand]').forEach(b => b.onclick = () => { state.brands = state.brands.filter(x => x.id !== b.dataset.removeBrand); save(); refresh(); }); list.querySelectorAll('[data-remove-drink]').forEach(b => b.onclick = () => { const brand = brandOf(b.dataset.brandId); if (brand) brand.drinks = brand.drinks.filter(d => d.id !== b.dataset.removeDrink); save(); refresh(); }); }
   categoryInput.onchange = refresh; refresh();
-  document.querySelector('#brand-form').onsubmit = e => { e.preventDefault(); const name = new FormData(e.target).get('brand').trim(); if (!name || brandsFor(categoryInput.value).some(b => b.name === name)) return; state.custom.push({ id: crypto.randomUUID(), category: categoryInput.value, name, drinks: [] }); save(); e.target.reset(); refresh(); };
+  document.querySelector('#brand-form').onsubmit = e => { e.preventDefault(); const name = new FormData(e.target).get('brand').trim(); if (!name || brandsFor(categoryInput.value).some(b => b.name === name)) return; state.brands.push({ id: crypto.randomUUID(), category: categoryInput.value, name, drinks: [] }); save(); e.target.reset(); refresh(); };
   drinkForm.onsubmit = e => { e.preventDefault(); const data = new FormData(e.target), brand = brandOf(data.get('brand')); if (!brand) return; brand.drinks.push({ id: crypto.randomUUID(), name: data.get('drink').trim(), caffeinePer100: numberOrNull(data.get('caffeine')), caloriesPer100: numberOrNull(data.get('calories')) }); save(); e.target.reset(); refresh(); };
 }
 function openSettings() { openModal(`${modalHead('设置')}<form id="settings-form"><label class="field-label">每日目标（ml）</label><div class="amount-input"><input name="goal" type="number" min="100" max="10000" value="${state.goal}" required><span>ml</span></div><button class="primary-button" type="submit">保存</button></form>`); document.querySelector('#settings-form').onsubmit = e => { e.preventDefault(); state.goal = Number(new FormData(e.target).get('goal')); save(); document.querySelector('#modal').close(); render(); }; }
 function exportRecords() { const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`; const csv = '\uFEFF' + [['日期','时间','大类','品牌','饮品名称','容量(ml)','咖啡因(mg)','热量(kcal)'], ...state.records.map(r => [r.date,r.time,categoryOf(r.category).name,r.brandName,r.drinkName || r.typeName,r.amount,r.caffeine,r.calories])].map(r => r.map(cell).join(',')).join('\r\n'); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8'})); a.download = `喝点什么-${dateKey(new Date())}.csv`; a.click(); toast('已导出'); }
 render();
+restoreCloud();
+
+async function restoreCloud() {
+  try {
+    const remote = await pullState();
+    if (remote) state = mergeStates(remote, state);
+    save();
+    cloudReady = true;
+    render();
+    await pushState(state);
+  } catch {
+    cloudReady = true;
+  }
+}
