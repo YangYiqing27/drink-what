@@ -1,5 +1,5 @@
 import { categories, storageKey, dateKey, fromDate, numberOrNull, migrate, summarize, monthCells } from './model.js';
-import { pullState, pushState } from './cloud.js';
+import { pullState, pushState, currentUser, authenticate, logout } from './cloud.js';
 
 const paths = {
   drop: '<path d="M12 3C9 7 5.5 10.5 5.5 15a6.5 6.5 0 0 0 13 0C18.5 10.5 15 7 12 3Z"/><path d="M9 15a3 3 0 0 0 3 3"/>',
@@ -20,6 +20,9 @@ const fmt = n => Number(n || 0).toLocaleString();
 let state = migrate(JSON.parse(localStorage.getItem(storageKey) || 'null'));
 let page = 'home', selectedDate = dateKey(new Date()), month = fromDate(selectedDate), undoRecord, toastTimer;
 let cloudReady = false, cloudSyncTimer;
+let user = null, revision = 0, syncQueue = Promise.resolve(), syncError = '', dirty = false;
+const cacheKey = () => user ? `${storageKey}:account:${user.id}` : storageKey;
+const persist = () => localStorage.setItem(cacheKey(), JSON.stringify(user ? { state, revision, dirty } : state));
 const allCategories = () => categories;
 const categoryOf = id => allCategories().find(c => c.id === id) || categories.at(-1);
 const brandsFor = category => state.brands.filter(b => b.category === category);
@@ -46,14 +49,39 @@ const mergeStates = (remote, local) => {
 };
 const save = () => {
   try {
-    localStorage.setItem(storageKey, JSON.stringify(state));
-    if (cloudReady) {
+    dirty = !!user;
+    persist();
+    if (cloudReady && user) {
       clearTimeout(cloudSyncTimer);
-      cloudSyncTimer = setTimeout(() => pushState(state).catch(() => {}), 250);
+      cloudSyncTimer = setTimeout(syncNow, 250);
     }
     return true;
   } catch { return false; }
 };
+function syncNow() {
+  clearTimeout(cloudSyncTimer);
+  const owner = user?.id, snapshot = JSON.parse(JSON.stringify(state));
+  if (!owner || !cloudReady || !dirty) return syncQueue;
+  syncQueue = syncQueue.then(async () => {
+    if (user?.id !== owner || syncError) return;
+    try {
+      const result = await pushState(snapshot, revision);
+      revision = result.revision;
+      dirty = JSON.stringify(state) !== JSON.stringify(snapshot);
+      persist();
+      updateAccountStatus();
+    } catch (error) {
+      syncError = error.message;
+      updateAccountStatus();
+      toast(error.message);
+    }
+  });
+  return syncQueue;
+}
+function updateAccountStatus() {
+  const button = document.querySelector('#account-button');
+  if (button) button.textContent = user ? `${user.username} · ${syncError ? '同步失败' : dirty ? '待同步' : cloudReady ? '已同步' : '加载中'}` : '登录 / 注册';
+}
 const daily = date => state.records.filter(r => r.date === date).sort((a, b) => b.time.localeCompare(a.time));
 const total = date => daily(date).reduce((s, r) => s + r.amount, 0);
 const nav = (id, text, symbol) => `<button class="nav-item ${page === id ? 'active' : ''}" data-page="${id}">${icon(symbol)}<span>${text}</span></button>`;
@@ -67,6 +95,11 @@ function render() {
   const amount = total(selectedDate), summary = summarize(daily(selectedDate)), percent = Math.round(amount / state.goal * 100);
   document.querySelector('#app').innerHTML = `<aside class="sidebar"><a class="brand" href="#">${icon('drop')}<span>喝点什么<small>DRINK DIARY</small></span></a><nav class="main-nav">${nav('home', '今天', 'home')}${nav('calendar', '饮水日历', 'calendar')}</nav><div class="sidebar-bottom"><button class="nav-item" data-action="manage">${icon('cup')}<span>品牌管理</span></button><button class="nav-item" data-action="settings">${icon('settings')}<span>设置</span></button></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">喝点什么 <span>/</span><strong>${page === 'home' ? '今日饮水' : '饮水日历'}</strong></div><div class="topbar-actions"><button class="header-button" data-action="manage" aria-label="品牌管理">${icon('cup')}</button><button class="header-button" data-action="settings" aria-label="设置">${icon('settings')}</button></div></header><div class="page-content">${page === 'home' ? homePage(amount, summary, percent) : calendarPage()} </div></main><dialog id="modal"></dialog><div id="toast" role="status" aria-live="polite"></div>`;
   bind();
+  const account = document.createElement('button');
+  account.id = 'account-button'; account.className = 'text-button';
+  account.onclick = () => user ? openAccount() : openAuth();
+  document.querySelector('.topbar-actions').prepend(account);
+  updateAccountStatus();
 }
 function homePage(amount, summary, percent) {
   return `<section class="page-heading"><h1>今日饮水</h1><label class="date-picker">${icon('calendar')}<input type="date" id="view-date" value="${selectedDate}" max="${dateKey(new Date())}"></label></section><section class="overview-grid"><div class="card progress-card"><div class="progress-content"><div class="section-label">饮品总量</div><div class="big-number">${fmt(amount)}<span>ml</span></div><div class="goal-line">每日目标 <strong>${fmt(state.goal)} ml</strong><button class="text-button" data-action="settings">修改目标 ${icon('arrow')}</button></div><div class="progress-track"><div style="width:${Math.min(percent, 100)}%"></div></div><div class="progress-caption"><span>${amount >= state.goal ? '已达标' : `还差 ${fmt(state.goal - amount)} ml`}</span><strong>${percent}%</strong></div><div class="little-stats">${summary.count} 杯</div></div><div class="water-visual"><div class="orbit"></div><div class="glass"><div class="water-fill" style="height:${Math.max(10, Math.min(percent, 95))}%"></div></div></div></div><div class="card nutrition-card"><div class="nutrition-item"><span>咖啡因</span><strong>${summary.caffeineKnown ? fmt(summary.caffeine) : '—'} <small>mg</small></strong></div><div class="nutrition-item"><span>热量</span><strong>${summary.caloriesKnown ? fmt(summary.calories) : '—'} <small>kcal</small></strong></div></div></section><section class="card quick-card"><div class="section-heading"><h2>记录饮品</h2><button class="text-button" data-action="manage">${icon('plus')} 管理品牌</button></div><div class="drink-grid">${allCategories().map(c => `<button class="drink-option" data-drink="${esc(c.id)}" style="--drink-color:${c.color};--drink-bg:${c.bg}"><span class="drink-icon">${icon(c.icon)}</span><strong>${esc(c.name)}</strong><span class="type-count">${brandsFor(c.id).length} 个品牌</span></button>`).join('')}</div></section>${recordCard()}`;
@@ -79,6 +112,7 @@ function calendarPage() {
   return `<section class="page-heading"><h1>饮水日历</h1><button class="outline-button" data-action="today">今天</button></section><section class="calendar-summary"><div class="card"><span>本月总量</span><strong>${fmt(state.records.filter(r => r.date.startsWith(`${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}`)).reduce((s, r) => s + r.amount, 0))} <small>ml</small></strong></div></section><section class="card calendar-card"><div class="section-heading"><h2>${month.getFullYear()} 年 ${month.getMonth() + 1} 月</h2><div class="month-controls"><button data-action="prev-month">${icon('arrow')}</button><button data-action="next-month">${icon('arrow')}</button></div></div><div class="heat-legend"><span>少</span>${[.06,.25,.45,.68,.88].map(v => `<i style="--heat-opacity:${v}"></i>`).join('')}<span>多</span><small>按每日总量</small></div><div class="weekdays">${['一','二','三','四','五','六','日'].map(d => `<span>${d}</span>`).join('')}</div><div class="calendar-grid">${monthCells(month).map(cell => { const amount = total(cell.key); const rows = daily(cell.key); const opacity = amount ? Math.min(.12 + amount / state.goal * .76, .88) : .06; return `<button class="calendar-day ${cell.inMonth ? '' : 'outside'} ${cell.key === selectedDate ? 'selected' : ''}" style="--heat-opacity:${opacity}" data-day="${cell.key}"><span class="day-number">${cell.day}</span>${rows.length ? `<span class="day-total">${fmt(amount)} ml</span>` : ''}</button>`; }).join('')}</div></section><div class="calendar-detail">${recordCard()}</div>`;
 }
 function bind() {
+  if (user && !cloudReady) return;
   document.querySelector('.brand').onclick = e => { e.preventDefault(); page = 'home'; render(); };
   document.querySelectorAll('[data-page]').forEach(el => el.onclick = () => { page = el.dataset.page; render(); });
   document.querySelector('#view-date')?.addEventListener('change', e => { if (e.target.value <= dateKey(new Date())) { selectedDate = e.target.value; render(); } });
@@ -119,18 +153,89 @@ function openManage(category = 'coffee') {
 }
 function openSettings() { openModal(`${modalHead('设置')}<form id="settings-form"><label class="field-label">每日目标（ml）</label><div class="amount-input"><input name="goal" type="number" min="100" max="10000" value="${state.goal}" required><span>ml</span></div><button class="primary-button" type="submit">保存</button></form>`); document.querySelector('#settings-form').onsubmit = e => { e.preventDefault(); state.goal = Number(new FormData(e.target).get('goal')); save(); document.querySelector('#modal').close(); render(); }; }
 function exportRecords() { const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`; const csv = '\uFEFF' + [['日期','时间','大类','品牌','饮品名称','容量(ml)','咖啡因(mg)','热量(kcal)'], ...state.records.map(r => [r.date,r.time,categoryOf(r.category).name,r.brandName,r.drinkName || r.typeName,r.amount,r.caffeine,r.calories])].map(r => r.map(cell).join(',')).join('\r\n'); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8'})); a.download = `喝点什么-${dateKey(new Date())}.csv`; a.click(); toast('已导出'); }
-render();
-restoreCloud();
-
-async function restoreCloud() {
+function openAuth(mode = 'login') {
+  openModal(`${modalHead(mode === 'login' ? '登录' : '注册账号')}<form id="auth-form">
+    <label class="field-label" for="username">账号</label>
+    <input class="standard-input" id="username" name="username" autocomplete="username" pattern="[A-Za-z0-9_]{3,32}" minlength="3" maxlength="32" placeholder="字母、数字或下划线，3–32位" required>
+    <label class="field-label" for="password">密码</label>
+    <input class="standard-input" id="password" name="password" type="password" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}" minlength="8" maxlength="128" required>
+    ${mode === 'register' ? '<label class="field-label" for="password-confirm">确认密码</label><input class="standard-input" id="password-confirm" type="password" autocomplete="new-password" required>' : ''}
+    <p id="auth-error" role="alert"></p><button class="primary-button" type="submit">${mode === 'login' ? '登录' : '注册'}</button>
+    <button class="text-button" type="button" id="auth-switch">${mode === 'login' ? '还没有账号？注册' : '已有账号？登录'}</button>
+    </form>`);
+  document.querySelector('#auth-switch').onclick = () => openAuth(mode === 'login' ? 'register' : 'login');
+  document.querySelector('#auth-form').onsubmit = async e => {
+    e.preventDefault();
+    const form = e.target, button = form.querySelector('[type=submit]'), error = form.querySelector('#auth-error');
+    if (mode === 'register' && form.password.value !== document.querySelector('#password-confirm').value) { error.textContent = '两次输入的密码不一致'; return; }
+    button.disabled = true;
+    try {
+      const result = await authenticate(mode, form.username.value, form.password.value);
+      await loadAccount(result.user);
+      toast('已登录');
+    } catch (err) { error.textContent = err.message; button.disabled = false; }
+  };
+}
+async function loadAccount(account) {
+  clearTimeout(cloudSyncTimer);
+  user = account; cloudReady = false; syncError = ''; undoRecord = null;
+  const cached = JSON.parse(localStorage.getItem(cacheKey()) || 'null');
+  state = migrate(cached?.state); revision = cached?.revision || 0; dirty = !!cached?.dirty;
+  render();
   try {
     const remote = await pullState();
-    if (remote) state = mergeStates(remote, state);
-    save();
-    cloudReady = true;
-    render();
-    await pushState(state);
-  } catch {
-    cloudReady = true;
-  }
+    if (dirty) {
+      if (revision !== remote.revision) syncError = '云端已有新版本，本机未同步修改已保留，请在账号中选择处理方式';
+    } else {
+      state = migrate(remote.state); revision = remote.revision;
+      dirty = !remote.state || remote.state.version !== state.version;
+    }
+    cloudReady = true; persist(); render();
+    if (dirty && !syncError) await syncNow();
+  } catch (error) { syncError = error.message; cloudReady = true; render(); toast(error.message); }
 }
+function openAccount() {
+  openModal(`${modalHead('账号')}<p>${esc(user.username)}</p>
+    <p role="status">${esc(syncError || (dirty ? '有修改尚未同步' : '已同步到云端'))}</p>
+    <button class="outline-button" id="retry-sync">重试同步本机修改</button>
+    <button class="outline-button" id="reload-cloud">加载云端最新数据</button>
+    <button class="outline-button" id="import-guest">导入此浏览器原有记录</button>
+    <button class="outline-button" id="account-export">导出记录</button>
+    <button class="outline-button" id="account-logout">退出登录</button>`);
+  document.querySelector('#account-export').onclick = exportRecords;
+  document.querySelector('#retry-sync').onclick = async () => {
+    syncError = ''; dirty = true; await syncNow(); openAccount();
+  };
+  document.querySelector('#reload-cloud').onclick = async () => {
+    if (dirty && !confirm('加载云端数据会替换本机未同步修改。请先导出记录。是否继续？')) return;
+    try {
+      const remote = await pullState();
+      localStorage.setItem(`${cacheKey()}:backup`, JSON.stringify(state));
+      state = migrate(remote.state); revision = remote.revision; dirty = false; syncError = '';
+      persist(); render(); toast('已加载云端数据');
+    } catch (error) { toast(error.message); }
+  };
+  document.querySelector('#import-guest').onclick = async () => {
+    if (!confirm('把此浏览器登录前的记录和自定义饮品合并到当前账号？')) return;
+    state = mergeStates(state, migrate(JSON.parse(localStorage.getItem(storageKey) || 'null')));
+    save(); await syncNow(); render(); toast(syncError || '已导入');
+  };
+  document.querySelector('#account-logout').onclick = async () => {
+    await syncNow();
+    if (dirty && !confirm('部分修改尚未同步，仍保留在本机。是否退出？')) return;
+    try {
+      await logout(); user = null; cloudReady = false; syncError = ''; dirty = false; revision = 0; undoRecord = null;
+      state = migrate(JSON.parse(localStorage.getItem(storageKey) || 'null'));
+      render();
+    } catch (error) { toast(error.message); }
+  };
+}
+render();
+currentUser().then(result => {
+  if (result.user) return loadAccount(result.user);
+}).catch(error => { toast(error.message); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && user && !dirty) {
+    syncQueue.then(() => loadAccount(user));
+  }
+});

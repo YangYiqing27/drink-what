@@ -1,28 +1,20 @@
-import { clientKey } from './model.js';
-
-const getClientId = () => {
-  let id = localStorage.getItem(clientKey);
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem(clientKey, id);
-  }
-  return id;
-};
-
-const clientId = getClientId();
-
-export async function pullState() {
-  const response = await fetch(`/api/state?client_id=${encodeURIComponent(clientId)}`);
-  if (!response.ok) throw new Error(`Cloud read failed: ${response.status}`);
-  const payload = await response.json();
-  return payload.state || null;
-}
-
-export async function pushState(state) {
-  const response = await fetch('/api/state', {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, state }),
+async function api(path, body, method = 'POST') {
+  const response = await fetch(path, {
+    method: body === undefined ? 'GET' : method,
+    credentials: 'same-origin',
+    headers: body === undefined ? {} : { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!response.ok) throw new Error(`Cloud write failed: ${response.status}`);
+  const payload = await response.json().catch(() => ({ error: '服务暂不可用' }));
+  if (!response.ok) {
+    const error = new Error(payload.error || `请求失败：${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
 }
+export const currentUser = () => api('/api/auth/me');
+export const authenticate = (mode, username, password) => api(`/api/auth/${mode}`, { username, password });
+export const logout = () => api('/api/auth/logout', {});
+export const pullState = () => api('/api/state');
+export const pushState = (state, revision) => api('/api/state', { state, revision }, 'PUT');
