@@ -1,19 +1,18 @@
 const cloudbaseMode = import.meta.env.VITE_BACKEND === 'cloudbase';
-const cloudbaseEnv = import.meta.env.VITE_CLOUDBASE_ENV_ID;
+const cloudbaseApiUrl = import.meta.env.VITE_CLOUDBASE_API_URL;
 const tokenKey = 'drink-what-cloudbase-token';
-let cloudbaseApp;
 
 async function cloudbaseApi(action, payload = {}) {
-  if (!cloudbaseEnv) throw new Error('尚未配置 CloudBase 环境 ID');
-  if (!cloudbaseApp) {
-    const { default: cloudbase } = await import('@cloudbase/js-sdk');
-    cloudbaseApp = cloudbase.init({ env: cloudbaseEnv });
-  }
-  const result = await cloudbaseApp.callFunction({
-    name: 'drink-api',
-    data: { action, payload, token: localStorage.getItem(tokenKey) || '' },
+  if (!cloudbaseApiUrl) throw new Error('尚未配置 CloudBase API 地址');
+  const response = await fetch(cloudbaseApiUrl, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(localStorage.getItem(tokenKey) ? { Authorization: `Bearer ${localStorage.getItem(tokenKey)}` } : {}),
+    },
+    body: JSON.stringify({ action, payload }),
   });
-  const body = result.result;
+  const body = await response.json().catch(() => null);
   if (!body?.ok) {
     const error = new Error(body?.error || '服务暂不可用');
     error.status = body?.status || 503;

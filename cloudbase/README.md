@@ -6,8 +6,18 @@
 
 1. 登录腾讯云 CloudBase，创建环境。
 2. 启用云函数、云数据库和静态网站托管。
-3. 创建 Node.js 云函数 `drink-api`，上传 `cloudbase/functions/drink-api` 目录并部署。
-4. 静态网站托管将接收本项目的 `dist/` 内容。
+3. 创建 **HTTP 云函数** `drink-api`，上传 `cloudbase/drink-api-http.zip` 并部署。
+4. 在函数环境变量中配置：
+
+```text
+CLOUDBASE_ENV_ID=你的环境ID
+CLOUDBASE_APIKEY=在环境的 API Key 管理中创建的 Server Key
+ALLOWED_ORIGIN=静态托管网站的完整 https 地址
+```
+
+`Server Key` 仅保存在云函数环境变量中，绝不能填到网页源码或发送给他人。
+部署成功后，复制函数的 HTTPS 访问地址。
+5. 静态网站托管将接收本项目的 `dist/` 内容。
 
 首次注册、登录或保存记录时，会创建 `drink_users`、`drink_sessions`、`drink_state` 三个集合。客户端不会直接访问这些集合。
 
@@ -17,7 +27,7 @@
 
 ```dotenv
 VITE_BACKEND=cloudbase
-VITE_CLOUDBASE_ENV_ID=你的CloudBase环境ID
+VITE_CLOUDBASE_API_URL=你的HTTP云函数HTTPS访问地址
 ```
 
 ```bash

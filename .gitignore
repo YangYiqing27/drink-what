@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env.production.local
+cloudbase/drink-api*.zip
 .DS_Store
 .idea/
 *.xcuserstate

@@ -3,6 +3,6 @@
   "private": true,
   "main": "index.js",
   "dependencies": {
-    "@cloudbase/node-sdk": "^3.9.0"
+    "@cloudbase/js-sdk": "^3.10.3"
   }
 }
