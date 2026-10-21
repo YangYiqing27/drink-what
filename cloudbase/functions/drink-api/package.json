@@ -1,0 +1,8 @@
+{
+  "name": "drink-api",
+  "private": true,
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.9.0"
+  }
+}

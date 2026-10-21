@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
+    "build:cloudbase": "VITE_BACKEND=cloudbase vite build",
     "preview": "vite preview --host 0.0.0.0"
   },
   "devDependencies": {
+    "@cloudbase/js-sdk": "^3.10.0",
     "vite": "^6.1.0"
   }
 }
